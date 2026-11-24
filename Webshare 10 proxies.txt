@@ -1,0 +1,10 @@
+45.38.107.97:6014:bivwqmnj:6pssg3eaa1rx
+64.137.96.74:6641:bivwqmnj:6pssg3eaa1rx
+198.23.243.226:6361:bivwqmnj:6pssg3eaa1rx
+38.154.185.97:6370:bivwqmnj:6pssg3eaa1rx
+84.247.60.125:6095:bivwqmnj:6pssg3eaa1rx
+191.96.254.138:6185:bivwqmnj:6pssg3eaa1rx
+198.46.161.42:5092:bivwqmnj:6pssg3eaa1rx
+64.137.10.153:5803:bivwqmnj:6pssg3eaa1rx
+104.164.49.38:7693:bivwqmnj:6pssg3eaa1rx
+23.26.71.145:5628:bivwqmnj:6pssg3eaa1rx

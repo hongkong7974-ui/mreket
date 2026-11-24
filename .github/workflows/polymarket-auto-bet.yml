@@ -1,0 +1,57 @@
+name: Polymarket Auto-Bettor (Webshare Proxy)
+
+on:
+  workflow_dispatch: # تشغيل يدوي في أي وقت
+  schedule:
+    - cron: '0 */5 * * *' # صمام أمان: إعادة تشغيل كل 5 ساعات لضمان الاستمرارية للأبد
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: polymarket-bet-daemon
+  cancel-in-progress: true # إلغاء الدورة السابقة لتشغيل دورة واحدة فقط دائماً بدون تكرار
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  auto-bet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340 # يعمل لمدة 5 ساعات و 40 دقيقة (قبل حد جيتهاب الأقصى 6 ساعات)
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: |
+          npm install || true
+          npm install --no-save @polymarket/clob-client-v2 @polymarket/builder-relayer-client viem ethers axios https-proxy-agent node-fetch dotenv firebase-admin mongodb
+
+      - name: Run Polymarket Auto-Bet Daemon
+        env:
+          polymarket_PRIVATE_KEY: ${{ secrets.POLYMARKET_PRIVATE_KEY || secrets.polymarket_PRIVATE_KEY }}
+          polymarket_Address: ${{ secrets.POLYMARKET_ADDRESS || secrets.polymarket_Address }}
+          polymarket_API: ${{ secrets.POLYMARKET_API || secrets.polymarket_API }}
+          PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MIN_RESERVE_USDC: ${{ secrets.MIN_RESERVE_USDC || '0' }}
+        run: |
+          echo "=== Running Polymarket Bot Daemon (Unbuffered Live Stream) ==="
+          stdbuf -oL -eL node "Polymarket bet auto.mjs"
+
+      - name: Self-Trigger Next Run (24/7 Forever Loop)
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "=== Dispatching next 24/7 workflow run ==="
+          gh workflow run polymarket-auto-bet.yml --ref ${{ github.ref_name }} || true
