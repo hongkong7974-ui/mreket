@@ -943,6 +943,11 @@ async function checkAndRedeemPositions(funder, walletClient, clobClient, relayCl
             const value = pos.current_value || 0;
             const condId = pos.condition_id;
 
+            // Ignore settled lost positions ($0 payout)
+            if (value <= 0) {
+                continue;
+            }
+
             log('⚡', `Executing automated Claim for "${title}" (~$${value.toFixed(2)} USDC)...`);
 
             if (DRY_RUN) {
@@ -968,7 +973,8 @@ async function checkAndRedeemPositions(funder, walletClient, clobClient, relayCl
                         value: '0',
                         data
                     };
-                    const txRes = await relayClient.executeDepositWalletBatch([call], funder);
+                    const deadline = Math.floor(Date.now() / 1000) + 3600; // 1 hour deadline
+                    const txRes = await relayClient.executeDepositWalletBatch([call], funder, deadline);
                     log('⏳', `Redemption submitted via Relayer (TxID: ${txRes.transactionID}) -- waiting for confirmation...`);
                     const receipt = await txRes.wait();
                     log('🎉', `Redemption confirmed! TxHash: ${receipt?.transactionHash || txRes.transactionHash}`);
@@ -1014,14 +1020,15 @@ async function getPendingClaimsStatus(funder) {
         const pendingPositions = [];
 
         for (const pos of positions) {
-            // 1) Explicitly marked redeemable by Polymarket
-            if (pos.redeemable || pos.status === 'REDEEMABLE') {
-                totalPendingValue += (pos.current_value || 0);
+            const val = pos.current_value || 0;
+            // 1) Explicitly marked redeemable by Polymarket and has real value
+            if (val > 0 && (pos.redeemable || pos.status === 'REDEEMABLE')) {
+                totalPendingValue += val;
                 pendingPositions.push({ ...pos, reason: 'Ready for Claim' });
             }
             // 2) Won market waiting for oracle settlement (price ~ 100¢ / >= 0.95)
-            else if (pos.status === 'OPEN' && ((pos.current_price || pos.cur_price || 0) >= 0.95)) {
-                totalPendingValue += (pos.current_value || 0);
+            else if (val > 0 && pos.status === 'OPEN' && ((pos.current_price || pos.cur_price || 0) >= 0.95)) {
+                totalPendingValue += val;
                 pendingPositions.push({ ...pos, reason: 'Won match waiting for Claim resolution' });
             }
         }
