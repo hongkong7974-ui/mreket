@@ -588,6 +588,12 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
 
 async function searchFixture(team1, team2) {
     const terms = new Set();
+    // 1) Full match search terms first (critical for Polymarket public-search!)
+    terms.add(`${team1} vs ${team2}`);
+    terms.add(`${team1} ${team2}`);
+    terms.add(`${team2} vs ${team1}`);
+
+    // 2) Individual team and significant words as fallback
     if (team1.length >= 3) terms.add(team1);
     if (team2.length >= 3) terms.add(team2);
 
@@ -615,7 +621,7 @@ async function searchFixture(team1, team2) {
                 }
 
                 if (!t1Found || !t2Found) {
-                    const parts = (ev.title || '').split(/\s+vs\.?\s+/i);
+                    const parts = (ev.title || '').split(/\s+(?:vs\.?|[-–—])\s+/i);
                     if (parts.length >= 2) {
                         const m1 = teamsMatch(parts[0], team1) && teamsMatch(parts[1], team2);
                         const m2 = teamsMatch(parts[0], team2) && teamsMatch(parts[1], team1);
