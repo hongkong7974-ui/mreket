@@ -154,10 +154,32 @@ function getProxies() {
     return DEFAULT_PROXIES;
 }
 
-function initProxies() {
+async function initProxies() {
+    if (process.argv.includes('--no-proxy') || process.env.NO_PROXY) {
+        log('🌐', 'Proxy disabled via flag/env -- operating in direct connection mode');
+        activeProxyAgent = null;
+        return;
+    }
     proxiesList = getProxies();
     currentProxyIndex = 0;
-    applyProxy(proxiesList[0]);
+    if (proxiesList.length > 0) {
+        applyProxy(proxiesList[0]);
+        // Quick verification of proxy connectivity (timeout 3.5s)
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 3500);
+            await nodeFetch('https://gamma-api.polymarket.com/events?limit=1', {
+                agent: activeProxyAgent,
+                signal: controller.signal
+            }).finally(() => clearTimeout(timer));
+            log('🌐', `Proxy verified & active: #${currentProxyIndex + 1} (${proxiesList[0].split('@')[1] || proxiesList[0]})`);
+        } catch (e) {
+            log('⚠️', `Proxy connection check (${e.message}) -- falling back to direct connection for ultra-reliability`);
+            activeProxyAgent = null;
+            axios.defaults.httpsAgent = undefined;
+            axios.defaults.httpAgent = undefined;
+        }
+    }
 }
 
 function applyProxy(proxyUrl) {
@@ -484,6 +506,29 @@ function getSignificantWords(name) {
     return norm.split(' ').filter(w => w.length >= 3 && !GENERIC_WORDS.has(w));
 }
 
+function damerauLevenshtein(a, b) {
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+        for (let j = 1; j <= a.length; j++) {
+            const cost = a.charAt(j - 1) === b.charAt(i - 1) ? 0 : 1;
+            matrix[i][j] = Math.min(
+                matrix[i - 1][j] + 1,
+                matrix[i][j - 1] + 1,
+                matrix[i - 1][j - 1] + cost
+            );
+            if (i > 1 && j > 1 && a.charAt(j - 1) === b.charAt(i - 2) && a.charAt(j - 2) === b.charAt(i - 1)) {
+                matrix[i][j] = Math.min(matrix[i][j], matrix[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    return matrix[b.length][a.length];
+}
+
 function teamsMatch(nameA, nameB) {
     if (!nameA || !nameB) return false;
 
@@ -509,6 +554,11 @@ function teamsMatch(nameA, nameB) {
             if (wa.length >= 4 && wb.length >= 4 && (wa.includes(wb) || wb.includes(wa))) {
                 return true;
             }
+            // Fuzzy match for minor typos/transpositions (e.g. Shakhtar vs Shakthar)
+            if ((wa.length >= 7 && wb.length >= 7 && damerauLevenshtein(wa, wb) <= 2) ||
+                (wa.length >= 5 && wb.length >= 5 && damerauLevenshtein(wa, wb) <= 1)) {
+                return true;
+            }
         }
     }
     return false;
@@ -527,8 +577,10 @@ async function gammaGet(endpoint, params = {}, retries = 2) {
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+            // If previous attempts failed with proxy, fallback to direct fetch on final retry
+            const agent = (attempt === retries && activeProxyAgent) ? undefined : activeProxyAgent;
             const res = await nodeFetch(url.toString(), {
-                agent: activeProxyAgent,
+                agent,
                 signal: controller.signal,
                 headers: { 'Accept': 'application/json' },
             }).finally(() => clearTimeout(timer));
@@ -542,7 +594,7 @@ async function gammaGet(endpoint, params = {}, retries = 2) {
             if (attempt < retries) {
                 log('🔄', `Gamma request retry (${attempt + 1}/${retries}) for ${endpoint}: ${e.message}`);
                 rotateProxy();
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 1000));
             } else {
                 throw e;
             }
@@ -563,8 +615,10 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+            // If previous attempts failed with proxy, fallback to direct fetch on final retry
+            const agent = (attempt === retries && activeProxyAgent) ? undefined : activeProxyAgent;
             const res = await nodeFetch(url.toString(), {
-                agent: activeProxyAgent,
+                agent,
                 signal: controller.signal,
                 headers: { 'Accept': 'application/json' },
             }).finally(() => clearTimeout(timer));
@@ -578,7 +632,7 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
             if (attempt < retries) {
                 log('🔄', `Data API retry (${attempt + 1}/${retries}) for ${endpoint}: ${e.message}`);
                 rotateProxy();
-                await new Promise(r => setTimeout(r, 1500));
+                await new Promise(r => setTimeout(r, 1000));
             } else {
                 throw e;
             }
@@ -586,14 +640,71 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
     }
 }
 
-async function searchFixture(team1, team2) {
+function getLeagueTags(league) {
+    const tags = [];
+    if (league) {
+        const l = league.toLowerCase();
+        if (l.includes('champion') || l.includes('ucl')) tags.push('ucl');
+        if (l.includes('europa') || l.includes('uel')) tags.push('uel');
+        if (l.includes('premier') || l.includes('epl')) tags.push('epl');
+        if (l.includes('la liga') || l.includes('laliga')) tags.push('la-liga');
+        if (l.includes('serie a')) tags.push('serie-a');
+        if (l.includes('bundesliga')) tags.push('bundesliga');
+        if (l.includes('mls')) tags.push('mls');
+    }
+    tags.push('soccer');
+    return [...new Set(tags)];
+}
+
+async function searchFixture(team1, team2, league = null) {
+    // 1) Method 1: Scan active events under league tags (100% reliable, direct Polymarket catalog)
+    const tags = getLeagueTags(league);
+    for (const tag of tags) {
+        try {
+            log('🔍', `Checking active Polymarket events for tag: "${tag}"...`);
+            const events = await gammaGet('/events', { tag_slug: tag, closed: 'false', limit: 100 });
+            if (Array.isArray(events) && events.length) {
+                for (const ev of events) {
+                    if (ev.closed) continue;
+                    let t1Found = false;
+                    let t2Found = false;
+
+                    if (Array.isArray(ev.teams) && ev.teams.length >= 2) {
+                        const home = ev.teams[0]?.name || '';
+                        const away = ev.teams[1]?.name || '';
+                        t1Found = teamsMatch(home, team1) || teamsMatch(away, team1);
+                        t2Found = teamsMatch(home, team2) || teamsMatch(away, team2);
+                    }
+
+                    if (!t1Found || !t2Found) {
+                        const parts = (ev.title || '').split(/\s+(?:vs\.?|[-–—])\s+/i);
+                        if (parts.length >= 2) {
+                            const m1 = teamsMatch(parts[0], team1) && teamsMatch(parts[1], team2);
+                            const m2 = teamsMatch(parts[0], team2) && teamsMatch(parts[1], team1);
+                            if (m1 || m2) {
+                                t1Found = true;
+                                t2Found = true;
+                            }
+                        }
+                    }
+
+                    if (t1Found && t2Found) {
+                        log('✅', `Polymarket event found: "${ev.title}" (slug: ${ev.slug})`);
+                        return ev;
+                    }
+                }
+            }
+        } catch (e) {
+            log('⚠️', `Tag search error for "${tag}": ${e.message}`);
+        }
+    }
+
+    // 2) Method 2: Public search fallback
     const terms = new Set();
-    // 1) Full match search terms first (critical for Polymarket public-search!)
     terms.add(`${team1} vs ${team2}`);
     terms.add(`${team1} ${team2}`);
     terms.add(`${team2} vs ${team1}`);
 
-    // 2) Individual team and significant words as fallback
     if (team1.length >= 3) terms.add(team1);
     if (team2.length >= 3) terms.add(team2);
 
@@ -892,9 +1003,9 @@ async function resolveFunderAndType(walletAddress, relayClient) {
     // 1) Try Polymarket profile API
     try {
         const res = await nodeFetch(`https://polymarket.com/api/profile/userData?address=${walletAddress}`, {
-            agent: activeProxyAgent,
+            agent: activeProxyAgent || undefined,
             headers: { 'Accept': 'application/json' },
-            timeout: 8000
+            timeout: 5000
         });
         if (res.ok) {
             const data = await res.json();
@@ -1218,7 +1329,7 @@ async function runCycle(db, wallet, col, client, relayClient, funder, isDepositW
         }
 
         // 3) Search fixture on Polymarket
-        const event = await searchFixture(p.team1, p.team2);
+        const event = await searchFixture(p.team1, p.team2, p.league);
         if (!event) {
             const retries = (history.searchRetries[betKey] || 0) + 1;
             history.searchRetries[betKey] = retries;
@@ -1445,7 +1556,7 @@ async function main() {
         throw new Error('Missing PRIVATE_KEY in .env');
     }
 
-    initProxies();
+    await initProxies();
     const db = initFirebase();
     const col = await initMongo();
 
