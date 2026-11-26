@@ -529,7 +529,27 @@ function damerauLevenshtein(a, b) {
     return matrix[b.length][a.length];
 }
 
-function teamsMatch(nameA, nameB) {
+function isAbbreviationMatch(nameA, nameB, abbrA = '') {
+    const normA = normalise(nameA);
+    const normB = normalise(nameB).replace(/\s+/g, '');
+    const cleanAbbr = normalise(abbrA);
+    
+    if (cleanAbbr && (cleanAbbr === normB || normB.replace(/[aeiou]/g, '') === cleanAbbr)) {
+        return true;
+    }
+    const words = normA.split(' ').filter(Boolean);
+    const initials = words.map(w => w[0]).join('');
+    if (initials === normB) return true;
+    if (words.length >= 2) {
+        const c1 = words[0].slice(0, 2) + words.slice(1).join('');
+        if (c1 === normB) return true;
+        const c2 = words[0].slice(0, 2) + words.slice(1).map(w => w[0]).join('');
+        if (c2 === normB) return true;
+    }
+    return false;
+}
+
+function teamsMatch(nameA, nameB, abbrA = '') {
     if (!nameA || !nameB) return false;
 
     // Strict gender & youth category match
@@ -540,6 +560,11 @@ function teamsMatch(nameA, nameB) {
     const normA = normalise(nameA);
     const normB = normalise(nameB);
     if (normA === normB) return true;
+
+    // Abbreviation / initials check (e.g. Kuopion PS vs KuPS, PSG vs Paris Saint-Germain)
+    if (isAbbreviationMatch(nameA, nameB, abbrA) || isAbbreviationMatch(nameB, nameA)) {
+        return true;
+    }
 
     const sigA = getSignificantWords(nameA);
     const sigB = getSignificantWords(nameB);
@@ -641,6 +666,10 @@ function getLeagueTags(league) {
         const l = league.toLowerCase();
         if (l.includes('champion') || l.includes('ucl')) tags.push('ucl');
         if (l.includes('europa') || l.includes('uel')) tags.push('uel');
+        if (l.includes('conference') || l.includes('uecl') || l.includes('col')) {
+            tags.push('europa-conference-league');
+            tags.push('uecl');
+        }
         if (l.includes('premier') || l.includes('epl')) tags.push('epl');
         if (l.includes('la liga') || l.includes('laliga')) tags.push('la-liga');
         if (l.includes('serie a')) tags.push('serie-a');
@@ -667,8 +696,10 @@ async function searchFixture(team1, team2, league = null) {
                     if (Array.isArray(ev.teams) && ev.teams.length >= 2) {
                         const home = ev.teams[0]?.name || '';
                         const away = ev.teams[1]?.name || '';
-                        t1Found = teamsMatch(home, team1) || teamsMatch(away, team1);
-                        t2Found = teamsMatch(home, team2) || teamsMatch(away, team2);
+                        const homeAbbr = ev.teams[0]?.abbreviation || '';
+                        const awayAbbr = ev.teams[1]?.abbreviation || '';
+                        t1Found = teamsMatch(home, team1, homeAbbr) || teamsMatch(away, team1, awayAbbr);
+                        t2Found = teamsMatch(home, team2, homeAbbr) || teamsMatch(away, team2, awayAbbr);
                     }
 
                     if (!t1Found || !t2Found) {
@@ -1319,6 +1350,14 @@ async function runCycle(db, wallet, col, client, relayClient, funder, isDepositW
             log('⚠️', `Cannot classify prediction: "${p.prediction}"`);
             await recordBet(col, history, betKey, 0, null);
             results.push({ ...p, status: 'SKIP', reason: 'Unknown prediction type' });
+            continue;
+        }
+
+        // Exclude Handicap / Spread bets (e.g. "Braga -1.5 Wins") due to high risk
+        if (cls.type === 'handicap') {
+            log('🛡️', `Skip -- Handicap/Spread bet excluded ("${p.prediction}") [High Risk]`);
+            await recordBet(col, history, betKey, 0, null);
+            results.push({ ...p, status: 'SKIP', reason: 'Handicap excluded (High Risk)' });
             continue;
         }
 
