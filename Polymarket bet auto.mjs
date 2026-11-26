@@ -565,7 +565,7 @@ function teamsMatch(nameA, nameB) {
 }
 
 // ═══════════════════════════════════════════════
-//  GAMMA API CLIENT (Search & Markets)
+//  GAMMA API CLIENT (Search & Markets - Direct & Zero Proxy Bandwidth)
 // ═══════════════════════════════════════════════
 async function gammaGet(endpoint, params = {}, retries = 2) {
     const url = new URL(endpoint, GAMMA_API_BASE);
@@ -577,10 +577,9 @@ async function gammaGet(endpoint, params = {}, retries = 2) {
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-            // If previous attempts failed with proxy, fallback to direct fetch on final retry
-            const agent = (attempt === retries && activeProxyAgent) ? undefined : activeProxyAgent;
+            // Public Gamma API is read-only and never geoblocked -> ALWAYS fetch direct to save 100% of proxy bandwidth
             const res = await nodeFetch(url.toString(), {
-                agent,
+
                 signal: controller.signal,
                 headers: { 'Accept': 'application/json' },
             }).finally(() => clearTimeout(timer));
@@ -593,7 +592,6 @@ async function gammaGet(endpoint, params = {}, retries = 2) {
         } catch (e) {
             if (attempt < retries) {
                 log('🔄', `Gamma request retry (${attempt + 1}/${retries}) for ${endpoint}: ${e.message}`);
-                rotateProxy();
                 await new Promise(r => setTimeout(r, 1000));
             } else {
                 throw e;
@@ -603,7 +601,7 @@ async function gammaGet(endpoint, params = {}, retries = 2) {
 }
 
 // ═══════════════════════════════════════════════
-//  DATA API CLIENT (Positions & Valuations)
+//  DATA API CLIENT (Positions & Valuations - Direct & Zero Proxy Bandwidth)
 // ═══════════════════════════════════════════════
 async function dataApiGet(endpoint, params = {}, retries = 2) {
     const url = new URL(endpoint, DATA_API_BASE);
@@ -615,10 +613,8 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
         try {
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-            // If previous attempts failed with proxy, fallback to direct fetch on final retry
-            const agent = (attempt === retries && activeProxyAgent) ? undefined : activeProxyAgent;
+            // Public Data API is read-only -> ALWAYS fetch direct to save 100% of proxy bandwidth
             const res = await nodeFetch(url.toString(), {
-                agent,
                 signal: controller.signal,
                 headers: { 'Accept': 'application/json' },
             }).finally(() => clearTimeout(timer));
@@ -631,7 +627,6 @@ async function dataApiGet(endpoint, params = {}, retries = 2) {
         } catch (e) {
             if (attempt < retries) {
                 log('🔄', `Data API retry (${attempt + 1}/${retries}) for ${endpoint}: ${e.message}`);
-                rotateProxy();
                 await new Promise(r => setTimeout(r, 1000));
             } else {
                 throw e;
@@ -1000,10 +995,9 @@ async function resolveFunderAndType(walletAddress, relayClient) {
         return { funder: FUNDER_ADDRESS, isDepositWallet: true };
     }
 
-    // 1) Try Polymarket profile API
+    // 1) Try Polymarket profile API (Direct public API, zero proxy bandwidth)
     try {
         const res = await nodeFetch(`https://polymarket.com/api/profile/userData?address=${walletAddress}`, {
-            agent: activeProxyAgent || undefined,
             headers: { 'Accept': 'application/json' },
             timeout: 5000
         });
