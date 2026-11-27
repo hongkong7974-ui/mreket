@@ -793,22 +793,24 @@ async function getEventMarkets(event, neededType) {
     const hasMoreMarketsType = ['over_under', 'team_over', 'btts_yes', 'btts_no', 'handicap'].includes(neededType);
 
     if (hasMoreMarketsType) {
-        const hasTotals = markets.some(m => m.sportsMarketType === 'totals');
         const hasBTTS = markets.some(m => m.sportsMarketType === 'both_teams_to_score');
-        const hasSpreads = markets.some(m => m.sportsMarketType === 'spreads');
 
-        const needsExtra = (neededType === 'over_under' && !hasTotals) ||
-            ((neededType === 'btts_yes' || neededType === 'btts_no') && !hasBTTS) ||
-            (neededType === 'handicap' && !hasSpreads);
+        // Always inspect -more-markets for spreads/totals because the main event often only has one primary line
+        const needsExtra = neededType === 'over_under' ||
+            neededType === 'team_over' ||
+            neededType === 'handicap' ||
+            ((neededType === 'btts_yes' || neededType === 'btts_no') && !hasBTTS);
 
-        if (needsExtra && event.slug) {
+        if (needsExtra && event.slug && !event.slug.endsWith('-more-markets')) {
             try {
-                const moreSlug = event.slug.endsWith('-more-markets') ? event.slug : `${event.slug}-more-markets`;
+                const moreSlug = `${event.slug}-more-markets`;
                 log('🔍', `Fetching additional markets from slug: ${moreSlug}`);
                 const extraEvents = await gammaGet('/events', { slug: moreSlug });
                 if (extraEvents && extraEvents[0]?.markets?.length) {
-                    markets = markets.concat(extraEvents[0].markets);
-                    log('✅', `Added ${extraEvents[0].markets.length} additional markets`);
+                    const existingIds = new Set(markets.map(m => m.id || m.conditionId || m.question));
+                    const newMarkets = extraEvents[0].markets.filter(m => !existingIds.has(m.id || m.conditionId || m.question));
+                    markets = markets.concat(newMarkets);
+                    log('✅', `Added ${newMarkets.length} additional markets`);
                 }
             } catch { }
         }
@@ -974,29 +976,48 @@ async function findMarketAndOutcome(event, classification, team1, team2) {
                 if (m.sportsMarketType === 'spreads') {
                     const outcomes = parseJsonArray(m.outcomes);
                     const tokenIds = parseJsonArray(m.clobTokenIds);
-                    const marketLine = parseFloat(m.line || 0);
-                    const q = `${m.question || ''} ${m.groupItemTitle || ''}`;
+                    if (outcomes.length < 2 || tokenIds.length < 2) continue;
 
-                    // Check if market line matches target line
-                    const lineMatches = Math.abs(marketLine - targetLine) < 0.01 ||
-                        q.includes(signStr) ||
-                        q.includes(String(targetLine));
+                    let marketLine = parseFloat(m.line);
+                    if (isNaN(marketLine)) {
+                        const lm = (m.groupItemTitle || m.question || '').match(/\(([+-]?\d+\.?\d*)\)/);
+                        marketLine = lm ? parseFloat(lm[1]) : NaN;
+                    }
+                    if (isNaN(marketLine)) continue;
 
-                    if (lineMatches) {
-                        for (let i = 0; i < outcomes.length; i++) {
-                            if (teamsMatch(outcomes[i], targetTeam)) {
-                                return {
-                                    market: m,
-                                    tokenID: tokenIds[i],
-                                    outcomeName: `${outcomes[i]} (${signStr})`,
-                                    outcomeIndex: i
-                                };
-                            }
+                    // In Polymarket spreads ("Spread: TeamA (-1.5)"), outcomes[0] is ALWAYS the team owning m.line,
+                    // and outcomes[1] is the opponent owning the inverse (+1.5) line.
+                    const rawTitle = (m.groupItemTitle || m.question || '').replace(/^Spread:\s*/i, '');
+                    const titleTeam = rawTitle.replace(/\s*\([+-]?\d+\.?\d*\)\s*$/, '').trim();
+                    const primaryTeam = titleTeam || outcomes[0];
+                    const isYesNo = outcomes[0].toLowerCase() === 'yes';
+
+                    // Case A: Direct match (e.g. target "Braga -1.5" -> Market "Braga (-1.5)", pick outcomes[0])
+                    if (Math.abs(marketLine - targetLine) < 0.01) {
+                        if (teamsMatch(primaryTeam, targetTeam) && (isYesNo || teamsMatch(outcomes[0], targetTeam))) {
+                            return {
+                                market: m,
+                                tokenID: tokenIds[0],
+                                outcomeName: `${isYesNo ? primaryTeam : outcomes[0]} (${signStr})`,
+                                outcomeIndex: 0
+                            };
+                        }
+                    }
+
+                    // Case B: Inverse positive handicap (e.g. target "KuPS +1.5" -> Market "Braga (-1.5)", pick outcomes[1])
+                    if (targetLine > 0 && Math.abs(marketLine - (-targetLine)) < 0.01 && !isYesNo) {
+                        if (!teamsMatch(primaryTeam, targetTeam) && teamsMatch(outcomes[1], targetTeam)) {
+                            return {
+                                market: m,
+                                tokenID: tokenIds[1],
+                                outcomeName: `${outcomes[1]} (${signStr})`,
+                                outcomeIndex: 1
+                            };
                         }
                     }
                 }
             }
-            log('⚠️', `Spread line ${targetLine} for team "${targetTeam}" not found`);
+            log('⚠️', `Spread line ${signStr} for team "${targetTeam}" not found`);
             return null;
         }
 
@@ -1369,11 +1390,11 @@ async function runCycle(db, wallet, col, client, relayClient, funder, isDepositW
             continue;
         }
 
-        // Exclude Handicap / Spread bets (e.g. "Braga -1.5 Wins") due to high risk
-        if (cls.type === 'handicap') {
-            log('🛡️', `Skip -- Handicap/Spread bet excluded ("${p.prediction}") [High Risk]`);
+        // Exclude Over/Under & Team Over goals bets (Filter #1: 66.7% historical accuracy)
+        if (cls.type === 'over_under' || cls.type === 'team_over') {
+            log('🛡️', `Skip -- Over/Under Goals bet excluded ("${p.prediction}") [Filter #1]`);
             await recordBet(col, history, betKey, 0, null);
-            results.push({ ...p, status: 'SKIP', reason: 'Handicap excluded (High Risk)' });
+            results.push({ ...p, status: 'SKIP', reason: 'Over/Under Goals excluded (Filter #1)' });
             continue;
         }
 
@@ -1457,23 +1478,19 @@ async function runCycle(db, wallet, col, client, relayClient, funder, isDepositW
         const tracker = history.oddsTracker[betKey] || { peakOdds: currentOdds, lastOdds: currentOdds };
 
         // ═══════════════════════════════════════════════
-        //  RULE: MINIMUM ODDS FLOOR (Odds < 1.15)
+        //  RULE: MINIMUM ODDS FLOOR (Odds < 1.18)
         // ═══════════════════════════════════════════════
-        if (currentOdds < 1.15) {
-            if (p.confidence < 85) {
-                if (minutesLeft <= 30) {
-                    // Kickoff window reached and odds are still < 1.15 with conf < 85% -> REJECT
-                    log('🛑', `Odds ${currentOdds.toFixed(2)} < 1.15 and confidence ${p.confidence}% < 85% at kickoff window (${Math.round(minutesLeft)}m) -> REJECTED`);
-                    await recordBet(col, history, betKey, 0, event.id);
-                    results.push({ ...p, status: 'SKIP', reason: `Odds ${currentOdds.toFixed(2)} < 1.15 with conf < 85%` });
-                    continue;
-                } else {
-                    // Match is still far (> 30 mins) -> do NOT kill; wait to see if odds rise!
-                    log('⏳', `Odds ${currentOdds.toFixed(2)} < 1.15 (conf ${p.confidence}%) but kickoff in ${Math.round(minutesLeft)} mins -> Waiting for odds to rise`);
-                    continue;
-                }
+        if (currentOdds < 1.18) {
+            if (minutesLeft <= 30) {
+                // Kickoff window reached and odds are still < 1.18 -> REJECT
+                log('🛑', `Odds ${currentOdds.toFixed(2)} < 1.18 at kickoff window (${Math.round(minutesLeft)}m) -> REJECTED`);
+                await recordBet(col, history, betKey, 0, event.id);
+                results.push({ ...p, status: 'SKIP', reason: `Odds ${currentOdds.toFixed(2)} < 1.18` });
+                continue;
             } else {
-                log('⚡', `Odds ${currentOdds.toFixed(2)} < 1.15 ALLOWED because confidence ${p.confidence}% >= 85%`);
+                // Match is still far (> 30 mins) -> do NOT kill; wait to see if odds rise!
+                log('⏳', `Odds ${currentOdds.toFixed(2)} < 1.18 (conf ${p.confidence}%) but kickoff in ${Math.round(minutesLeft)} mins -> Waiting for odds to rise`);
+                continue;
             }
         }
 
