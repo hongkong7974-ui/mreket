@@ -552,6 +552,13 @@ function isAbbreviationMatch(nameA, nameB, abbrA = '') {
 function teamsMatch(nameA, nameB, abbrA = '') {
     if (!nameA || !nameB) return false;
 
+    // A draw / tie or match title is NEVER an individual team name
+    const rawA = nameA.trim().toLowerCase();
+    const rawB = nameB.trim().toLowerCase();
+    if (rawA === 'draw' || rawB === 'draw' || rawA.startsWith('draw') || rawB.startsWith('draw') || /\b(draw|tie)\b/i.test(rawA) || /\b(draw|tie)\b/i.test(rawB)) {
+        return false;
+    }
+
     // Strict gender & youth category match
     const catA = extractCategory(nameA);
     const catB = extractCategory(nameB);
@@ -829,12 +836,19 @@ async function findMarketAndOutcome(event, classification, team1, team2) {
         return null;
     }
 
+    const isDrawMarket = (m) => {
+        const title = (m.groupItemTitle || '').toLowerCase();
+        const q = (m.question || '').toLowerCase();
+        return /\b(draw|tie)\b/i.test(title) || /\b(draw|tie)\b/i.test(q) || title.startsWith('draw') || q.includes('end in a draw');
+    };
+
     switch (classification.type) {
         case 'moneyline': {
             const targetTeam = classification.team;
             // 1) Check 3-way moneyline market (common in soccer)
             for (const m of markets) {
                 if (m.sportsMarketType === 'moneyline' && m.groupItemTitle) {
+                    if (isDrawMarket(m)) continue; // Never match Draw market as a team win!
                     if (teamsMatch(m.groupItemTitle, targetTeam)) {
                         const tokenIds = parseJsonArray(m.clobTokenIds);
                         const outcomes = parseJsonArray(m.outcomes);
@@ -852,6 +866,7 @@ async function findMarketAndOutcome(event, classification, team1, team2) {
             // 2) Check 2-way moneyline market (common in basketball, tennis)
             for (const m of markets) {
                 if (m.sportsMarketType === 'moneyline' || !m.sportsMarketType) {
+                    if (isDrawMarket(m)) continue;
                     const outcomes = parseJsonArray(m.outcomes);
                     const tokenIds = parseJsonArray(m.clobTokenIds);
                     for (let i = 0; i < outcomes.length; i++) {
@@ -877,6 +892,7 @@ async function findMarketAndOutcome(event, classification, team1, team2) {
 
             for (const m of markets) {
                 if (m.sportsMarketType === 'moneyline' && m.groupItemTitle) {
+                    if (isDrawMarket(m)) continue; // CRUCIAL: NEVER match Draw market as opponent!
                     if (teamsMatch(m.groupItemTitle, oppTeam)) {
                         const tokenIds = parseJsonArray(m.clobTokenIds);
                         const outcomes = parseJsonArray(m.outcomes);
